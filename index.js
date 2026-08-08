@@ -5,38 +5,62 @@ const { Server } = require('socket.io');
 
 const app = express();
 app.use(cors());
+app.use(express.json()); // 추가: JSON body 파싱
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
   cors: {
-    origin: '*', // MVP 단계라 전체 허용, 나중에 client 주소로 좁힐 예정
+    origin: '*',
     methods: ['GET', 'POST'],
   },
 });
 
-// 점검 상태 관리 (MVP: 관리자가 수동으로 바꾸는 걸 흉내내는 메모리 상태)
 let serverStatus = {
   state: 'checking', // 'online' | 'checking' | 'scheduled'
-  endTime: Date.now() + 1000 * 60 * 60 * 2, // 임시로 2시간 뒤 종료 예정
+  endTime: Date.now() + 1000 * 60 * 60 * 2,
 };
 
 let connectedUsers = 0;
 
+// 관리자 키는 Render 환경변수로 관리 (로컬 테스트용 기본값 포함)
+const ADMIN_KEY = process.env.ADMIN_KEY || 'temp-admin-key-1234';
+
 app.get('/', (req, res) => {
   res.send('피파또점검이네 서버 살아있음');
+});
+
+// 관리자용 상태 변경 API
+app.post('/admin/status', (req, res) => {
+  const key = req.headers['x-admin-key'];
+  if (key !== ADMIN_KEY) {
+    return res.status(401).json({ error: '인증 실패' });
+  }
+
+  const { state, endTime } = req.body;
+  const validStates = ['online', 'checking', 'scheduled'];
+  if (!validStates.includes(state)) {
+    return res.status(400).json({ error: 'state 값이 올바르지 않습니다' });
+  }
+
+  serverStatus = {
+    state,
+    endTime: endTime || serverStatus.endTime,
+  };
+
+  io.emit('status:update', serverStatus); // 전체 접속자에게 즉시 반영
+  console.log('[상태 변경]', serverStatus);
+  res.json({ success: true, status: serverStatus });
 });
 
 io.on('connection', (socket) => {
   connectedUsers++;
   console.log(`[연결] 소켓 ID: ${socket.id}, 현재 접속자: ${connectedUsers}`);
 
-  // 새로 접속한 사람에게 현재 상태 즉시 전송
   socket.emit('status:update', serverStatus);
   io.emit('users:count', connectedUsers);
 
   socket.on('chat:message', (payload) => {
-    // payload: { nickname, message }
     io.emit('chat:message', {
       nickname: payload.nickname,
       message: payload.message,
@@ -46,9 +70,7 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     connectedUsers--;
-    console.log(
-      `[연결 종료] 소켓 ID: ${socket.id}, 현재 접속자: ${connectedUsers}`
-    );
+    console.log(`[연결 종료] 소켓 ID: ${socket.id}, 현재 접속자: ${connectedUsers}`);
     io.emit('users:count', connectedUsers);
   });
 });
