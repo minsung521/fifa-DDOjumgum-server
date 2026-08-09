@@ -5,7 +5,7 @@ const { Server } = require('socket.io');
 
 const app = express();
 app.use(cors());
-app.use(express.json()); // 추가: JSON body 파싱
+app.use(express.json());
 
 const server = http.createServer(app);
 
@@ -16,18 +16,40 @@ const io = new Server(server, {
   },
 });
 
-let serverStatus = {
-  state: 'checking', // 'online' | 'checking' | 'scheduled'
-  endTime: Date.now() + 1000 * 60 * 60 * 2,
+const DEFAULT_GAME_ID = 'fc-online';
+const roomName = (gameId) => `game:${gameId}`;
+
+// 게임별 상태를 분리 저장 (지금은 fc-online 하나만 쓰지만
+// 나중에 다른 게임 추가 시 이 구조를 그대로 활용)
+const gameStates = {
+  [DEFAULT_GAME_ID]: {
+    status: {
+      state: 'checking', // 'online' | 'checking' | 'scheduled'
+      endTime: Date.now() + 1000 * 60 * 60 * 2,
+    },
+    connectedUsers: 0,
+  },
 };
 
-let connectedUsers = 0;
+function getGameState(gameId) {
+  if (!gameStates[gameId]) {
+    gameStates[gameId] = {
+      status: { state: 'checking', endTime: Date.now() + 1000 * 60 * 60 * 2 },
+      connectedUsers: 0,
+    };
+  }
+  return gameStates[gameId];
+}
 
-// 관리자 키는 Render 환경변수로 관리 (로컬 테스트용 기본값 포함)
 const ADMIN_KEY = process.env.ADMIN_KEY || 'temp-admin-key-1234';
 
 app.get('/', (req, res) => {
   res.send('피파또점검이네 서버 살아있음');
+});
+
+// 작업 C(콜드스타트 방지)에서 쓸 헬스체크, 미리 추가해둠
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
 });
 
 // 관리자용 상태 변경 API
@@ -37,31 +59,40 @@ app.post('/admin/status', (req, res) => {
     return res.status(401).json({ error: '인증 실패' });
   }
 
-  const { state, endTime } = req.body;
+  const { state, endTime, gameId = DEFAULT_GAME_ID } = req.body;
   const validStates = ['online', 'checking', 'scheduled'];
   if (!validStates.includes(state)) {
     return res.status(400).json({ error: 'state 값이 올바르지 않습니다' });
   }
 
-  serverStatus = {
+  const game = getGameState(gameId);
+  game.status = {
     state,
-    endTime: endTime || serverStatus.endTime,
+    endTime: endTime || game.status.endTime,
   };
 
-  io.emit('status:update', serverStatus); // 전체 접속자에게 즉시 반영
-  console.log('[상태 변경]', serverStatus);
-  res.json({ success: true, status: serverStatus });
+  io.to(roomName(gameId)).emit('status:update', { gameId, ...game.status });
+  console.log(`[상태 변경] gameId=${gameId}`, game.status);
+  res.json({ success: true, gameId, status: game.status });
 });
 
 io.on('connection', (socket) => {
-  connectedUsers++;
-  console.log(`[연결] 소켓 ID: ${socket.id}, 현재 접속자: ${connectedUsers}`);
+  const gameId = socket.handshake.query.gameId || DEFAULT_GAME_ID;
+  const room = roomName(gameId);
+  socket.data.gameId = gameId;
+  socket.join(room);
 
-  socket.emit('status:update', serverStatus);
-  io.emit('users:count', connectedUsers);
+  const game = getGameState(gameId);
+  game.connectedUsers++;
+
+  console.log(`[연결] 소켓 ID: ${socket.id}, gameId=${gameId}, 현재 접속자: ${game.connectedUsers}`);
+
+  socket.emit('status:update', { gameId, ...game.status });
+  io.to(room).emit('users:count', { gameId, count: game.connectedUsers });
 
   socket.on('chat:message', (payload) => {
-    io.emit('chat:message', {
+    io.to(room).emit('chat:message', {
+      gameId,
       nickname: payload.nickname,
       message: payload.message,
       timestamp: Date.now(),
@@ -69,9 +100,9 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    connectedUsers--;
-    console.log(`[연결 종료] 소켓 ID: ${socket.id}, 현재 접속자: ${connectedUsers}`);
-    io.emit('users:count', connectedUsers);
+    game.connectedUsers--;
+    console.log(`[연결 종료] 소켓 ID: ${socket.id}, gameId=${gameId}, 현재 접속자: ${game.connectedUsers}`);
+    io.to(room).emit('users:count', { gameId, count: game.connectedUsers });
   });
 });
 
