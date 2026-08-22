@@ -229,32 +229,40 @@ io.on('connection', (socket) => {
   // 채팅
   // ==========================================================
 
-  socket.on('chat:message', (payload) => {
+  // 닉네임 제출(입장) 전용 이벤트 — 채팅 참여 시점을 명시적으로 확정
+  socket.on('chat:join', (payload) => {
     const nickname =
       typeof payload?.nickname === 'string'
-        ? payload.nickname
+        ? payload.nickname.trim()
         : '';
+
+    if (!nickname || socket.data.nickname) return;
+
+    socket.data.nickname = nickname;
+
+    // 본인을 제외한 같은 room 유저에게만 입장 알림
+    socket.to(room).emit(
+      'user:joined',
+      {
+        gameId,
+        nickname,
+      }
+    );
+
+    // Apps Script 로그
+    logEvent('chat:join', gameId, { nickname });
+  });
+
+  socket.on('chat:message', (payload) => {
+    const nickname =
+      socket.data.nickname ||
+      (typeof payload?.nickname === 'string' ? payload.nickname : '');
 
     const message =
       typeof payload?.message === 'string'
         ? payload.message
         : '';
 
-    // 최초로 유효한 닉네임이 확인되는 시점 = 채팅 참여 시점
-    if (nickname && !socket.data.nickname) {
-      socket.data.nickname = nickname;
-
-      // 본인을 제외한 같은 room 유저에게만 입장 알림
-      socket.to(room).emit(
-        'user:joined',
-        {
-          gameId,
-          nickname,
-        }
-      );
-    }
-
-    // 기존 채팅 기능
     io.to(room).emit(
       'chat:message',
       {
