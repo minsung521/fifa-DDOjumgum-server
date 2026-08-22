@@ -240,6 +240,20 @@ io.on('connection', (socket) => {
         ? payload.message
         : '';
 
+    // 최초로 유효한 닉네임이 확인되는 시점 = 채팅 참여 시점
+    if (nickname && !socket.data.nickname) {
+      socket.data.nickname = nickname;
+
+      // 본인을 제외한 같은 room 유저에게만 입장 알림
+      socket.to(room).emit(
+        'user:joined',
+        {
+          gameId,
+          nickname,
+        }
+      );
+    }
+
     // 기존 채팅 기능
     io.to(room).emit(
       'chat:message',
@@ -293,6 +307,17 @@ io.on('connection', (socket) => {
     logEvent('users:count', gameId, {
       count: game.connectedUsers,
     });
+
+    // 닉네임을 설정했던(=실제로 채팅에 참여했던) 유저만 퇴장 알림
+    if (socket.data.nickname) {
+      socket.to(room).emit(
+        'user:left',
+        {
+          gameId,
+          nickname: socket.data.nickname,
+        }
+      );
+    }
   });
 });
 
