@@ -530,7 +530,8 @@ async function pollReservations() {
     const dueToEnd = reservations.filter((r) => {
       if (r.status !== 'active') return false;
 
-      const graceMs = (r.graceMinutes || 60) * 60 * 1000;
+      const graceMinutes = r.graceMinutes != null ? r.graceMinutes : 60;
+      const graceMs = graceMinutes * 60 * 1000;
 
       return now >= new Date(r.endAt).getTime() + graceMs;
     });
