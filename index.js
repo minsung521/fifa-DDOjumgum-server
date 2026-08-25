@@ -43,6 +43,26 @@ function logEvent(eventType, gameId, payload = {}) {
   });
 }
 
+// 예약 관련 Apps Script 웹훅 호출 (action 필드로 분기, 응답을 반환해야 하므로 await 가능한 형태)
+async function callReservationWebhook(action, params = {}) {
+  if (!APPS_SCRIPT_WEBHOOK_URL) {
+    throw new Error('APPS_SCRIPT_WEBHOOK_URL이 설정되어 있지 않습니다');
+  }
+
+  const res = await fetch(APPS_SCRIPT_WEBHOOK_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action,
+      ...params,
+    }),
+  });
+
+  return res.json();
+}
+
 
 // ============================================================
 // 게임 설정
@@ -64,6 +84,7 @@ const gameStates = {
       endTime: Date.now() + 1000 * 60 * 60 * 2,
     },
     connectedUsers: 0,
+    manualOverrideActive: false,
   },
 };
 
@@ -76,10 +97,41 @@ function getGameState(gameId) {
         endTime: Date.now() + 1000 * 60 * 60 * 2,
       },
       connectedUsers: 0,
+      manualOverrideActive: false,
     };
   }
 
   return gameStates[gameId];
+}
+
+// 상태 변경 + 브로드캐스트 + 로깅을 한 곳에서 처리 (수동 API / 예약 등록 / 스케줄러가 공유)
+function setGameStatus(gameId, state, endTime) {
+  const game = getGameState(gameId);
+
+  game.status = {
+    state,
+    endTime: endTime || game.status.endTime,
+  };
+
+  io.to(roomName(gameId)).emit(
+    'status:update',
+    {
+      gameId,
+      ...game.status,
+    }
+  );
+
+  console.log(
+    `[상태 변경] gameId=${gameId}`,
+    game.status
+  );
+
+  logEvent('status:update', gameId, {
+    state: game.status.state,
+    endTime: game.status.endTime,
+  });
+
+  return game.status;
 }
 
 
@@ -140,36 +192,139 @@ app.post('/admin/status', (req, res) => {
 
   const game = getGameState(gameId);
 
-  game.status = {
-    state,
-    endTime: endTime || game.status.endTime,
-  };
+  const status = setGameStatus(gameId, state, endTime);
 
-  // 클라이언트에게 상태 변경 전달
-  io.to(roomName(gameId)).emit(
-    'status:update',
-    {
-      gameId,
-      ...game.status,
-    }
-  );
-
-  console.log(
-    `[상태 변경] gameId=${gameId}`,
-    game.status
-  );
-
-  // Apps Script 로그
-  logEvent('status:update', gameId, {
-    state: game.status.state,
-    endTime: game.status.endTime,
-  });
+  // 관리자가 직접 상태를 바꾼 경우, 서버 재시작 전까지 자동 스케줄러가 개입하지 않도록 플래그 설정
+  game.manualOverrideActive = true;
 
   return res.json({
     success: true,
     gameId,
-    status: game.status,
+    status,
   });
+});
+
+
+// ============================================================
+// 관리자용 점검 예약 등록 API (프록시 → Apps Script)
+// ============================================================
+
+app.post('/admin/reservation', async (req, res) => {
+  const key = req.headers['x-admin-key'];
+
+  if (key !== ADMIN_KEY) {
+    return res.status(401).json({
+      error: '인증 실패',
+    });
+  }
+
+  const {
+    startAt,
+    endAt,
+    graceMinutes = 60,
+    gameId = DEFAULT_GAME_ID,
+  } = req.body;
+
+  if (!startAt || !endAt) {
+    return res.status(400).json({
+      error: 'startAt, endAt은 필수입니다',
+    });
+  }
+
+  try {
+    const result = await callReservationWebhook('createReservation', {
+      gameId,
+      startAt,
+      endAt,
+      graceMinutes,
+    });
+
+    if (!result || result.success !== true) {
+      console.error('[예약 등록] Apps Script 응답 실패:', result);
+      return res.status(502).json({
+        error: '예약 등록 실패',
+      });
+    }
+
+    // 등록 즉시 "점검예정" 전환, 카운트다운 target = startAt
+    setGameStatus(gameId, 'scheduled', new Date(startAt).getTime());
+
+    return res.json({
+      success: true,
+      id: result.id,
+    });
+  } catch (err) {
+    console.error('[예약 등록] 실패:', err.message);
+    return res.status(502).json({
+      error: '예약 등록 실패',
+    });
+  }
+});
+
+
+// ============================================================
+// 관리자용 상태 조회 API (관리자 페이지 폴링용)
+// ============================================================
+
+app.get('/admin/state', async (req, res) => {
+  const key = req.headers['x-admin-key'];
+
+  if (key !== ADMIN_KEY) {
+    return res.status(401).json({
+      error: '인증 실패',
+    });
+  }
+
+  const gameId = DEFAULT_GAME_ID;
+  const game = getGameState(gameId);
+
+  try {
+    let activeReservation = null;
+    let upcomingReservations = [];
+
+    if (APPS_SCRIPT_WEBHOOK_URL) {
+      const result = await callReservationWebhook('listReservations');
+
+      if (result && result.success === true && Array.isArray(result.reservations)) {
+        const reservations = result.reservations.filter(
+          (r) => r.gameId === gameId
+        );
+
+        const active = reservations.find((r) => r.status === 'active');
+
+        if (active) {
+          activeReservation = {
+            id: active.id,
+            startAt: active.startAt,
+            endAt: active.endAt,
+          };
+        }
+
+        upcomingReservations = reservations
+          .filter((r) => r.status === 'scheduled')
+          .sort(
+            (a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime()
+          )
+          .map((r) => ({
+            id: r.id,
+            startAt: r.startAt,
+            endAt: r.endAt,
+          }));
+      }
+    }
+
+    return res.json({
+      currentStatus: game.status.state,
+      manualOverrideActive: !!game.manualOverrideActive,
+      activeReservation,
+      upcomingReservations,
+    });
+  } catch (err) {
+    console.error('[GET /admin/state] 실패:', err.message);
+    return res.status(500).json({
+      error: '서버 에러',
+    });
+  }
 });
 
 
@@ -331,6 +486,71 @@ io.on('connection', (socket) => {
 
 
 // ============================================================
+// 점검 예약 자동 전환 폴링 스케줄러
+// ============================================================
+
+const RESERVATION_POLL_INTERVAL_MS = 30 * 1000;
+
+async function pollReservations() {
+  if (!APPS_SCRIPT_WEBHOOK_URL) return;
+
+  const gameId = DEFAULT_GAME_ID;
+  const game = getGameState(gameId);
+
+  // 관리자가 수동으로 상태를 바꿔둔 상태라면 서버 재시작 전까지 자동 전환하지 않음
+  if (game.manualOverrideActive) return;
+
+  try {
+    const result = await callReservationWebhook('listReservations');
+
+    if (!result || result.success !== true || !Array.isArray(result.reservations)) {
+      return;
+    }
+
+    const reservations = result.reservations.filter((r) => r.gameId === gameId);
+    const now = Date.now();
+
+    // scheduled -> active(점검중) 전환: startAt이 지난 예약 중 가장 이른 것 하나만
+    const dueToStart = reservations
+      .filter((r) => r.status === 'scheduled' && new Date(r.startAt).getTime() <= now)
+      .sort((a, b) => new Date(a.startAt).getTime() - new Date(b.startAt).getTime());
+
+    if (dueToStart.length > 0) {
+      const target = dueToStart[0];
+
+      setGameStatus(gameId, 'checking', new Date(target.endAt).getTime());
+
+      await callReservationWebhook('updateReservationStatus', {
+        id: target.id,
+        status: 'active',
+      });
+    }
+
+    // active -> done(정상 복귀) 전환: endAt + graceMinutes가 지난 예약
+    const dueToEnd = reservations.filter((r) => {
+      if (r.status !== 'active') return false;
+
+      const graceMs = (r.graceMinutes || 60) * 60 * 1000;
+
+      return now >= new Date(r.endAt).getTime() + graceMs;
+    });
+
+    for (const r of dueToEnd) {
+      setGameStatus(gameId, 'online');
+
+      await callReservationWebhook('updateReservationStatus', {
+        id: r.id,
+        status: 'done',
+      });
+    }
+  } catch (err) {
+    // Apps Script 응답 지연/실패가 서버 전체에 영향을 주면 안 됨
+    console.error('[pollReservations] 실패:', err.message);
+  }
+}
+
+
+// ============================================================
 // 서버 시작
 // ============================================================
 
@@ -338,4 +558,7 @@ const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
   console.log(`서버 실행 중: 포트 ${PORT}`);
+
+  pollReservations();
+  setInterval(pollReservations, RESERVATION_POLL_INTERVAL_MS);
 });
