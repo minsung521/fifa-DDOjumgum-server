@@ -19,7 +19,7 @@ if (!ADMIN_KEY) {
 // ============================================================
 // CORS 허용 origin 목록
 // ============================================================
-// ALLOWED_ORIGINS: 콤마로 구분된 프로덕션(Vercel) 도메인 목록 (예: https://ddojumgum.vercel.app)
+// ALLOWED_ORIGINS: 콤마로 구분된 프로덕션(Vercel) 도메인 목록 (예: https://fifa-ddojumgum-client.vercel.app)
 // 로컬 개발 편의를 위해 Vite 기본 포트는 항상 허용
 
 const allowedOrigins = [
