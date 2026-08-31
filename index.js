@@ -3,18 +3,54 @@ const http = require('http');
 const cors = require('cors');
 const { Server } = require('socket.io');
 
+// ============================================================
+// 관리자 인증 키 — 미설정 시 서버 기동 자체를 막는다 (fail-fast)
+// ============================================================
+
+const ADMIN_KEY = process.env.ADMIN_KEY;
+
+if (!ADMIN_KEY) {
+  console.error(
+    '[FATAL] ADMIN_KEY 환경변수가 설정되지 않았습니다. 서버를 종료합니다.'
+  );
+  process.exit(1);
+}
+
+// ============================================================
+// CORS 허용 origin 목록
+// ============================================================
+// ALLOWED_ORIGINS: 콤마로 구분된 프로덕션(Vercel) 도메인 목록 (예: https://fifa-ddojumgum-client.vercel.app)
+// 로컬 개발 편의를 위해 Vite 기본 포트는 항상 허용
+
+const allowedOrigins = [
+  ...(process.env.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean),
+  'http://localhost:5173',
+];
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    // origin이 없는 요청(서버 간 통신, curl, health check 등)은 허용
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('CORS로 차단된 요청입니다'));
+    }
+  },
+  credentials: true,
+};
+
 const app = express();
 
-app.use(cors());
+app.use(cors(corsOptions));
 app.use(express.json());
 
 const server = http.createServer(app);
 
 const io = new Server(server, {
-  cors: {
-    origin: '*',
-    methods: ['GET', 'POST'],
-  },
+  cors: corsOptions,
 });
 
 // ============================================================
@@ -133,14 +169,6 @@ function setGameStatus(gameId, state, endTime) {
 
   return game.status;
 }
-
-
-// ============================================================
-// 관리자 인증
-// ============================================================
-
-const ADMIN_KEY =
-  process.env.ADMIN_KEY || 'temp-admin-key-1234';
 
 
 // ============================================================
