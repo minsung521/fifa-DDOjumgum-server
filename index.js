@@ -365,9 +365,19 @@ io.on('connection', (socket) => {
     socket.handshake.query.gameId ||
     DEFAULT_GAME_ID;
 
+  // 유입 채널 구분용 UTM src (dc/femco 등). 값이 없거나 빈 문자열이면 'direct'로 명시 처리
+  // (|| 연산자는 값이 falsy할 때 의도치 않게 덮어쓸 수 있으므로 사용하지 않음)
+  const rawSrc = socket.handshake.query.src;
+  const src =
+    rawSrc === undefined || rawSrc === null || rawSrc === ''
+      ? 'direct'
+      : rawSrc;
+
   const room = roomName(gameId);
 
   socket.data.gameId = gameId;
+  socket.data.src = src;
+  socket.data.connectedAt = Date.now();
 
   socket.join(room);
 
@@ -401,6 +411,7 @@ io.on('connection', (socket) => {
   // Apps Script 로그
   logEvent('socket:connect', gameId, {
     count: game.connectedUsers,
+    src,
   });
 
   logEvent('users:count', gameId, {
@@ -461,6 +472,7 @@ io.on('connection', (socket) => {
     logEvent('chat:message', gameId, {
       nickname,
       messageLength: message.length,
+      src: socket.data.src,
     });
   });
 
@@ -490,9 +502,14 @@ io.on('connection', (socket) => {
       }
     );
 
+    // 채널별 체류 시간 파악용
+    const sessionDurationMs = Date.now() - socket.data.connectedAt;
+
     // Apps Script 로그
     logEvent('socket:disconnect', gameId, {
       count: game.connectedUsers,
+      src: socket.data.src,
+      sessionDurationMs,
     });
 
     logEvent('users:count', gameId, {
