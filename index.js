@@ -30,10 +30,21 @@ const allowedOrigins = [
   'http://localhost:5173',
 ];
 
+// 이 프로젝트(fifa-ddojumgum-client)의 Vercel 프리뷰 배포만 허용.
+// 브랜치 URL(…-git-<branch>-…)과 배포별 URL(…-<hash>-…) 모두 이 형식을 따른다.
+// *.vercel.app 전체는 허용하지 않는다.
+const allowedOriginPatterns = [
+  /^https:\/\/fifa-ddojumgum-client-[a-z0-9-]+-minsung521s-projects\.vercel\.app$/,
+];
+
+const isAllowedOrigin = (origin) =>
+  allowedOrigins.includes(origin) ||
+  allowedOriginPatterns.some((pattern) => pattern.test(origin));
+
 const corsOptions = {
   origin: (origin, callback) => {
     // origin이 없는 요청(서버 간 통신, curl, health check 등)은 허용
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || isAllowedOrigin(origin)) {
       callback(null, true);
     } else {
       callback(new Error('CORS로 차단된 요청입니다'));
